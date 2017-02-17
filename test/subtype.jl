@@ -829,7 +829,14 @@ function test_intersection()
     # part of issue #20344
     @testintersect(Tuple{Type{Tuple{Vararg{T, N} where N}}, Tuple} where T,
                    Tuple{Type{Tuple{Vararg{T, N}}} where N where T, Any},
-                   Tuple{Type{Tuple{}}, Tuple})
+                   Bottom)
+    @testintersect(Type{NTuple{N,UnitRange}} where N,
+                   Type{Tuple{Vararg{UnitRange}}},
+                   Bottom)
+
+    @testintersect(Type{NTuple{Z,UnitRange}} where Z,
+                   Type{NTuple{Z,String}} where Z,
+                   Type{Tuple{}})
 end
 
 function test_intersection_properties()

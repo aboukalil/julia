@@ -31,6 +31,7 @@ eltype{T}(x::Type{Ref{T}}) = T
 convert{T}(::Type{Ref{T}}, x::Ref{T}) = x
 
 # create Ref objects for general object conversion
+unsafe_convert{T}(::Type{Ref{T}}, x::Ref{T}) = unsafe_convert(Ptr{T}, x)
 unsafe_convert{T}(::Type{Ref{T}}, x) = unsafe_convert(Ptr{T}, x)
 
 ### Methods for a Ref object that can store a single value of any type

@@ -51,6 +51,15 @@ let
     @test  args_morespecific(b, a)
 end
 
+# another specificity issue
+_z_z_z_(x, y) = 1
+_z_z_z_(::Int, ::Int, ::Vector) = 2
+_z_z_z_(::Int, c...) = 3
+@test _z_z_z_(1, 1, []) == 2
+
+@test  args_morespecific(Tuple{T,Vararg{T}} where T<:Number,  Tuple{Number,Number,Vararg{Number}})
+@test !args_morespecific(Tuple{Number,Number,Vararg{Number}}, Tuple{T,Vararg{T}} where T<:Number)
+
 # with bound varargs
 
 _bound_vararg_specificity_1{T,N}(::Type{Array{T,N}}, d::Vararg{Int, N}) = 0

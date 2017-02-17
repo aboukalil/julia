@@ -607,6 +607,25 @@ static int subtype_tuple(jl_datatype_t *xd, jl_datatype_t *yd, jl_stenv_t *e, in
             if (!vvx && yi == (jl_value_t*)jl_any_type)
                 break;  // if y ends in `Vararg{Any}` skip checking everything
         }
+        if (vx && vy) {
+            // skip testing element type if vararg lengths are 0
+            if (jl_is_datatype(xi)) {
+                jl_value_t *xl = jl_tparam1(xi);
+                if (jl_is_typevar(xl)) {
+                    jl_varbinding_t *xlv = lookup(e, (jl_tvar_t*)xl);
+                    if (xlv && jl_is_long(xlv->lb) && jl_unbox_long(xlv->lb) == 0)
+                        break;
+                }
+            }
+            if (jl_is_datatype(yi)) {
+                jl_value_t *yl = jl_tparam1(yi);
+                if (jl_is_typevar(yl)) {
+                    jl_varbinding_t *ylv = lookup(e, (jl_tvar_t*)yl);
+                    if (ylv && jl_is_long(ylv->lb) && jl_unbox_long(ylv->lb) == 0)
+                        break;
+                }
+            }
+        }
         if (xi == lastx &&
             ((yi == lasty && !jl_has_free_typevars(xi) && !jl_has_free_typevars(yi)) ||
              (yi == lasty && !vx && vy && jl_is_leaf_type(xi)))) {
@@ -1198,7 +1217,11 @@ static jl_value_t *finish_unionall(jl_value_t *res, jl_varbinding_t *vb, jl_sten
     // remove/replace/rewrap free occurrences of this var in the environment
     jl_varbinding_t *btemp = e->vars;
     while (btemp != NULL) {
-        if (jl_has_typevar(btemp->lb, vb->var) && vb->lb != (jl_value_t*)btemp->var) {
+        if (jl_has_typevar(btemp->lb, vb->var)) {
+            if (vb->lb == (jl_value_t*)btemp->var) {
+                JL_GC_POP();
+                return jl_bottom_type;
+            }
             if (varval)
                 btemp->lb = jl_substitute_var(btemp->lb, vb->var, varval);
             else if (btemp->lb == (jl_value_t*)vb->var)
@@ -1207,7 +1230,11 @@ static jl_value_t *finish_unionall(jl_value_t *res, jl_varbinding_t *vb, jl_sten
                 btemp->lb = jl_new_struct(jl_unionall_type, vb->var, btemp->lb);
             assert((jl_value_t*)btemp->var != btemp->lb);
         }
-        if (jl_has_typevar(btemp->ub, vb->var) && vb->ub != (jl_value_t*)btemp->var) {
+        if (jl_has_typevar(btemp->ub, vb->var)) {
+            if (vb->ub == (jl_value_t*)btemp->var) {
+                JL_GC_POP();
+                return jl_bottom_type;
+            }
             if (varval)
                 btemp->ub = jl_substitute_var(btemp->ub, vb->var, varval);
             else if (btemp->ub == (jl_value_t*)vb->var)
@@ -1398,7 +1425,7 @@ static jl_value_t *intersect_tuple(jl_datatype_t *xd, jl_datatype_t *yd, jl_sten
         if (vy && !vx)
             yi = jl_unwrap_vararg(yi);
         jl_varbinding_t *xb=NULL, *yb=NULL;
-        if (vx && vy && lx != ly) {
+        if (vx && vy) {
             // {A^n...,Vararg{T,N}} ∩ {Vararg{S,M}} = {(A∩S)^n...,Vararg{T∩S,N}} plus N = M-n
             jl_value_t *xlen = jl_tparam1(jl_unwrap_unionall(xi));
             if (jl_is_typevar(xlen)) {
@@ -1420,10 +1447,17 @@ static jl_value_t *intersect_tuple(jl_datatype_t *xd, jl_datatype_t *yd, jl_sten
             if (vx && vy) {
                 int len = i > j ? i : j;
                 if ((xb && jl_is_long(xb->lb) && lx-1+jl_unbox_long(xb->lb) != len) ||
-                    (yb && jl_is_long(yb->lb) && ly-1+jl_unbox_long(yb->lb) != len))
+                    (yb && jl_is_long(yb->lb) && ly-1+jl_unbox_long(yb->lb) != len)) {
                     res = jl_bottom_type;
-                else
+                }
+                else if (param == 2 && jl_is_unionall(xi) != jl_is_unionall(yi)) {
+                    res = jl_bottom_type;
+                }
+                else {
+                    if (xb) set_var_to_const(xb, jl_box_long(len-lx+1), yb);
+                    if (yb) set_var_to_const(yb, jl_box_long(len-ly+1), xb);
                     res = (jl_value_t*)jl_apply_tuple_type_v(jl_svec_data(params), len);
+                }
             }
             else {
                 res = jl_bottom_type;
@@ -1931,14 +1965,6 @@ JL_DLLEXPORT jl_svec_t *jl_env_from_type_intersection(jl_value_t *a, jl_value_t 
 
 // specificity comparison
 
-static int type_eqv_with_ANY(jl_value_t *a, jl_value_t *b)
-{
-    // equate ANY and Any for specificity purposes, #16153
-    return ((a == (jl_value_t*)jl_any_type && b == jl_ANY_flag) ||
-            (b == (jl_value_t*)jl_any_type && a == jl_ANY_flag) ||
-            jl_types_equal(a, b));
-}
-
 static jl_datatype_t *jl_fix_vararg_bound(jl_datatype_t *tt, int nfix)
 {
     assert(jl_is_va_tuple(tt));
@@ -1994,6 +2020,24 @@ static size_t tuple_vararg_params(jl_svec_t *a, jl_vararg_kind_t *kind, jl_tuple
     return lenf;
 }
 
+static int type_eqv_with_ANY(jl_value_t *a, jl_value_t *b, jl_typeenv_t *env)
+{
+    // equate ANY and Any for specificity purposes, #16153
+    if ((a == (jl_value_t*)jl_any_type && b == jl_ANY_flag) ||
+        (b == (jl_value_t*)jl_any_type && a == jl_ANY_flag))
+        return 1;
+    JL_GC_PUSH2(&a, &b);
+    jl_typeenv_t *e = env;
+    while (e != NULL) {
+        a = jl_type_unionall(e->var, a);
+        b = jl_type_unionall(e->var, b);
+        e = e->prev;
+    }
+    int eq = jl_types_equal(a, b);
+    JL_GC_POP();
+    return eq;
+}
+
 static int type_morespecific_(jl_value_t *a, jl_value_t *b, int invariant, jl_typeenv_t *env);
 
 static int tuple_morespecific(jl_datatype_t *cdt, jl_datatype_t *pdt, int invariant, jl_typeenv_t *env)
@@ -2016,10 +2060,12 @@ static int tuple_morespecific(jl_datatype_t *cdt, jl_datatype_t *pdt, int invari
             cseq = (ci<clenr) && clenkind != JL_TUPLE_FIXED && jl_is_vararg_type(child[ci]);
         if (!pseq)
             pseq = (pi<plenr) && plenkind != JL_TUPLE_FIXED && jl_is_vararg_type(parent[pi]);
+
         if (ci >= clenf && !cseq)
-            return 1;
+            return some_morespecific || (pseq && plenr <= clenr+1);
         if (pi >= plenf && !pseq)
-            return (clenf==plenf || cseq) && some_morespecific;
+            return some_morespecific && (cseq || clenf >= plenf);
+
         if (ci < clenr) {
             ce = child[ci];
             if (jl_is_vararg_type(ce)) ce = jl_unwrap_vararg(ce);
@@ -2029,45 +2075,28 @@ static int tuple_morespecific(jl_datatype_t *cdt, jl_datatype_t *pdt, int invari
             if (jl_is_vararg_type(pe)) pe = jl_unwrap_vararg(pe);
         }
 
-        if (!type_morespecific_(ce, pe, invariant, env)) {
-            if (type_eqv_with_ANY(ce,pe)) {
-                if (ci==clenf-1 && pi==plenf-1) {
-                    if (!cseq && pseq)
-                        return 1;
-                    if (!some_morespecific)
-                        return 0;
-                }
-            }
-            else {
-                return 0;
-            }
-        }
-        else if (ci==clenr-1 && pi==plenr-1 && clenr == plenr && !cseq && pseq) {
+        int cms = type_morespecific_(ce, pe, invariant, env);
+        int pms = type_morespecific_(pe, ce, invariant, env);
+
+        if (!cms && pms) return 0;
+
+        // in Tuple{a,b...} and Tuple{c,d...} allow b and d to be disjoint
+        if (cseq && pseq && some_morespecific) return 1;
+
+        int eqv = type_eqv_with_ANY(ce,pe,env);
+
+        if (!cms && !eqv) return 0;
+
+        if (cms && !pms)
+            some_morespecific = 1;
+
+        if (cms && ci==clenr-1 && pi==plenr-1 && clenr == plenr && !cseq && pseq) {
             // make Vararg{X, 1} more specific than Vararg{X, N}
-            if (jl_is_vararg_type(child[ci]) && type_eqv_with_ANY(ce,pe))
+            if (jl_is_vararg_type(child[ci]) && eqv)
                 return 1;
         }
 
-        if (some_morespecific && cseq && !pseq)
-            return 1;
-
-        // at this point we know one element is strictly more specific
-        if (!(type_eqv_with_ANY(ce,pe) ||
-              (jl_is_typevar(pe) &&
-               jl_types_equal(ce,((jl_tvar_t*)pe)->ub)))) {
-            some_morespecific = 1;
-            // here go into a different mode where we return 1
-            // if the only reason the child is not more specific is
-            // argument count (i.e. ...)
-        }
-
-        /*
-          Ideally this would test `clenr > plenr`, but that causes something
-          bad to happen with these two definitions:
-          sub2ind(              inds::Indices{1},                I::Integer...)
-          sub2ind{N,T<:Integer}(inds::Union{Dims{N},Indices{N}}, I::AbstractVector{T}...)
-        */
-        if (cseq && pseq) return clenr >= plenr || some_morespecific;
+        if (cseq && pseq) return clenr > plenr || some_morespecific;
         ci++;
         pi++;
     }
@@ -2301,8 +2330,12 @@ static int type_morespecific_(jl_value_t *a, jl_value_t *b, int invariant, jl_ty
         if (invariant)
             return type_morespecific_(a, (jl_value_t*)((jl_tvar_t*)b)->ub, 0, env) &&
                 !type_morespecific_((jl_value_t*)((jl_tvar_t*)b)->ub, a, 0, env);
-        return jl_subtype(a, (jl_value_t*)((jl_tvar_t*)b)->ub) &&
-            jl_subtype((jl_value_t*)((jl_tvar_t*)b)->lb, a);
+        if (!(jl_subtype(a, (jl_value_t*)((jl_tvar_t*)b)->ub) &&
+              jl_subtype((jl_value_t*)((jl_tvar_t*)b)->lb, a)))
+            return 0;
+        if (num_occurs((jl_tvar_t*)b, env) > 1 && type_eqv_with_ANY(a, b, env))
+            return 0;
+        return 1;
     }
     if ((jl_datatype_t*)a == jl_any_type) return 0;
 
