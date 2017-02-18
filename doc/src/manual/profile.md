@@ -247,7 +247,7 @@ to save to a file using a wide `displaysize` in an [`IOContext`](@ref):
 
 ```julia
 open("/tmp/prof.txt", "w") do s
-  Profile.print(IOContext(s, :displaysize => (24, 500)))
+    Profile.print(IOContext(s, :displaysize => (24, 500)))
 end
 ```
 
